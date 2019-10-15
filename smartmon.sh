@@ -98,6 +98,37 @@ parse_smartctl_scsi_attributes() {
   [ ! -z "$grown_defects" ] && echo "grown_defects_count_raw_value{${labels},smart_id=\"12\"} ${grown_defects}"
 }
 
+parse_smartctl_nvme_attributes() {
+  local labels="$1"
+  while read line; do
+    attr_type="$(echo "${line}" | tr '=' ':' | cut -f1 -d: | sed 's/^ \+//g' | tr ' ' '_')"
+    attr_value="$(echo "${line}" | tr '=' ':' | cut -f2 -d: | sed 's/^ \+//g')"
+    case "${attr_type}" in
+    Available_Spare_Threshold) spare_thresh="$(echo ${attr_value} | tr -d '%'  | awk '{ printf "%e\n", $1 }')" ;;
+    Available_Spare) spare="$(echo ${attr_value} | tr -d '%'  | awk '{ printf "%e\n", $1 }')" ;;
+    Temperature) temp_cel="$(echo ${attr_value} | cut -f1 -d' ' | awk '{ printf "%e\n", $1 }')" ;;
+    Power_On_Hours) power_on="$(echo "${attr_value}" | tr -d ',' | awk '{ printf "%e\n", $1 }')" ;;
+    # https://media.kingston.com/support/downloads/MKP_521.6_SMART-DCP1000_attribute.pdf - the number of units read/written are in 1000 multiplies of 512.
+    # Multiplying here in order to be consistent with the other drive types and compatible with the https://grafana.com/grafana/dashboards/10664 grafana dashboard
+    Data_Units_Read) data_read="$(echo ${attr_value} | cut -f1 -d' ' | tr -d ',' | awk '{ printf "%e\n", $1*1000 }')" ;;
+    Data_Units_Written) data_written="$(echo ${attr_value} | cut -f1 -d' ' | tr -d ',' | awk '{ printf "%e\n", $1*1000 }')" ;;
+    Power_Cycles) power_cycle="$(echo ${attr_value} | tr -d ',' | awk '{ printf "%e\n", $1 }')" ;;
+    # this value indicates the percentage of the nvme subsystem expected life. Values greater than 100 can apear.
+    # Translating it to 'wear leveling count' values, in which 100% means unsued disk, and 0% means it is out of expected life.
+    # Should be consistent with non-nvme drives and compatible with the https://grafana.com/grafana/dashboards/10664 grafana dashboard
+    Percentage_Used) wear="$(echo ${attr_value} | tr -d '%' | awk '{ printf "%e\n", 100-$1 }')" ;;
+    esac
+  done
+  [ ! -z "$spare" ] && echo "available_spare_percent_value{${labels}} ${spare}"
+  [ ! -z "$spare_thresh" ] && echo "available_spare_threshold_percent_value{${labels}} ${spare_thresh}"
+  [ ! -z "$power_on" ] && echo "power_on_hours_raw_value{${labels}} ${power_on}"
+  [ ! -z "$temp_cel" ] && echo "temperature_celsius_raw_value{${labels}} ${temp_cel}"
+  [ ! -z "$power_cycle" ] && echo "power_cycle_count_raw_value{${labels}} ${power_cycle}"
+  [ ! -z "$data_read" ] && echo "total_lbas_read_raw_value{${labels}} ${data_read}"
+  [ ! -z "$data_written" ] && echo "total_lbas_written_raw_value{${labels}} ${data_written}"
+  [ ! -z "$wear" ] && echo "wear_leveling_count_value{${labels}} ${wear}"
+}
+
 extract_labels_from_smartctl_info() {
   local disk="$1" disk_type="$2"
   local model_family='<None>' device_model='<None>' serial_number='<None>' fw_version='<None>' vendor='<None>' product='<None>' revision='<None>' lun_id='<None>'
@@ -106,7 +137,7 @@ extract_labels_from_smartctl_info() {
     info_value="$(echo "${line}" | cut -f2- -d: | sed 's/^ \+//g' | sed 's/"/\\"/')"
     case "${info_type}" in
     Model_Family) model_family="${info_value}" ;;
-    Device_Model) device_model="${info_value}" ;;
+    Device_Model|Model_Number) device_model="${info_value}" ;;
     Serial_Number) serial_number="${info_value}" ;;
     Firmware_Version) fw_version="${info_value}" ;;
     Vendor) vendor="${info_value}" ;;
@@ -179,9 +210,11 @@ if [[ "$(expr "${smartctl_version}" : '\([0-9]*\)\..*')" -lt 6 ]]; then
   exit
 fi
 
+# get both regular and nvme devices
 device_list="$(smartctl --scan-open | awk '/^\/dev/{print $1 "|" $3}')"
+device_list_nvme="$(smartctl --scan-open -d nvme | awk '/^\/dev/{print $1 "|" $3}')"
 
-for device in ${device_list}; do
+for device in ${device_list} ${device_list_nvme}; do
   disk="$(echo ${device} | cut -f1 -d'|')"
   type="$(echo ${device} | cut -f2 -d'|')"
   active=1
@@ -201,8 +234,9 @@ for device in ${device_list}; do
   sat+megaraid*) smartctl -A -d "${type}" "${disk}" | parse_smartctl_attributes "${disk_labels}" ;;
   scsi) smartctl -A -d "${type}" "${disk}" | parse_smartctl_scsi_attributes "${disk_labels}" ;;
   megaraid*) smartctl -A -d "${type}" "${disk}" | parse_smartctl_scsi_attributes "${disk_labels}" ;;
+  nvme) smartctl -A -d "${type}" "${disk}" | parse_smartctl_nvme_attributes "${disk_labels}" ;;
   *)
-    echo "disk type is not sat, scsi or megaraid but ${type}"
+    echo "disk type is not sat, scsi, nvme or megaraid but ${type}"
     exit
     ;;
   esac
