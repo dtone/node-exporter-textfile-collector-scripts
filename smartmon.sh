@@ -228,6 +228,11 @@ for device in ${device_list} ${device_list_nvme}; do
   smart_info="$(smartctl -i -H -d "${type}" "${disk}")"
   disk_labels="$(echo "$smart_info" | extract_labels_from_smartctl_info "${disk}" "${type}")"
   echo "$smart_info" | parse_smartctl_info "${disk_labels}"
+
+  # skip this disk if SMART is unavailable
+  if echo "$smart_info" | grep -q -E 'SMART support is:\s+Unavailable'; then
+    continue
+  fi
   # Get the SMART attributes
   case ${type} in
   sat) smartctl -A -d "${type}" "${disk}" | parse_smartctl_attributes "${disk_labels}" ;;
